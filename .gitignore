@@ -12,3 +12,4 @@ cookies/
 config/settings.json
 config/task_history.json
 *.log
+release/tools/
