@@ -1,0 +1,14 @@
+*.pyc
+__pycache__/
+build/
+dist/
+release/*.exe
+release/build/
+release/*.spec
+tools/ffmpeg_bin/
+tools/ffmpeg_full/
+tools/deno/
+cookies/
+config/settings.json
+config/task_history.json
+*.log
