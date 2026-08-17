@@ -1,24 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-import os
-import sys
-from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
-block_cipher = None
+hiddenimports = collect_submodules("yt_dlp")
+datas = [("resources/app_icon.png", "resources")]
 
-# 项目根目录
-project_root = Path('G:/VideoDownloader')
+try:
+    hiddenimports += collect_submodules("yt_dlp_ejs")
+    datas += collect_data_files("yt_dlp_ejs")
+except Exception:
+    pass
 
 a = Analysis(
-    ['main.py'],
-    pathex=[str(project_root)],
+    ["main.py"],
+    pathex=[SPECPATH],
     binaries=[],
-    datas=[
-        (str(project_root / 'tools'), 'tools'),
-        (str(project_root / 'cookies'), 'cookies'),
-        (str(project_root / 'config'), 'config'),
-    ],
-    hiddenimports=['PyQt6', 'yt_dlp'],
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -34,17 +32,12 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='VideoDownloader',
+    name="VideoDownloader",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=True,
+    console=False,
+    icon="resources/app_icon.ico",
     disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
 )

@@ -1,173 +1,154 @@
-"""Cookie 管理模块 - 处理 Cookie 导入、存储和验证"""
-import os
+"""Cookie import, storage and lightweight validation."""
+from __future__ import annotations
+
+import json
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
+
+from VideoDownloader.utils import data_path
 
 
 class CookieManager:
-    """Cookie 管理器"""
+    PLATFORMS = ("youtube", "bilibili", "douyin")
 
-    PLATFORMS = ['youtube', 'bilibili']
-
-    def __init__(self, cookie_dir: str = 'cookies'):
-        import sys
-        # 优先使用传入的绝对路径
-        if Path(cookie_dir).is_absolute():
-            self.cookie_dir = Path(cookie_dir)
-        elif getattr(sys, 'frozen', False):
-            # 打包后：相对于 exe 所在目录
-            exe_dir = Path(sys.executable).parent
-            self.cookie_dir = exe_dir / cookie_dir
-        else:
-            # 开发环境：相对于项目根目录
-            self.cookie_dir = Path(__file__).parent.parent / cookie_dir
+    def __init__(self, cookie_dir: str = "cookies"):
+        self.cookie_dir = data_path(cookie_dir)
         self.cookie_dir.mkdir(parents=True, exist_ok=True)
 
     def get_cookie_path(self, platform: str) -> Path:
-        """获取指定平台的 Cookie 文件路径"""
-        return self.cookie_dir / f'{platform}_cookies.txt'
+        self._validate_platform(platform)
+        return self.cookie_dir / f"{platform}_cookies.txt"
 
     def save_cookie(self, platform: str, content: str) -> bool:
-        """保存 Cookie 内容到文件"""
-        if platform not in self.PLATFORMS:
-            raise ValueError(f"不支持的平台: {platform}")
-
-        cookie_path = self.get_cookie_path(platform)
+        self._validate_platform(platform)
+        value = (content or "").strip()
+        if not value:
+            return False
         try:
-            with open(cookie_path, 'w', encoding='utf-8') as f:
-                f.write(content.strip())
+            self.get_cookie_path(platform).write_text(value + "\n", encoding="utf-8")
             return True
-        except Exception as e:
-            print(f"保存 Cookie 失败: {e}")
+        except OSError:
             return False
 
     def load_cookie(self, platform: str) -> Optional[str]:
-        """加载 Cookie 内容"""
-        cookie_path = self.get_cookie_path(platform)
-        if not cookie_path.exists():
+        path = self.get_cookie_path(platform)
+        if not path.exists():
             return None
-
         try:
-            with open(cookie_path, 'r', encoding='utf-8') as f:
-                return f.read().strip()
-        except Exception as e:
-            print(f"读取 Cookie 失败: {e}")
+            return path.read_text(encoding="utf-8").strip()
+        except OSError:
             return None
 
     def get_cookie_path_for_yt_dlp(self, platform: str) -> Optional[str]:
-        """获取用于 yt-dlp 的 Cookie 文件路径（绝对路径）"""
-        cookie_path = self.get_cookie_path(platform)
-        if cookie_path.exists():
-            return str(cookie_path.resolve())
-        return None
+        try:
+            path = self.get_cookie_path(platform)
+        except ValueError:
+            return None
+        return str(path.resolve()) if self.is_cookie_valid(platform) else None
 
     def is_cookie_valid(self, platform: str) -> bool:
-        """检查 Cookie 是否有效（简单检查）"""
         content = self.load_cookie(platform)
         if not content:
             return False
-
-        # 检查 Netscape Cookie 格式基本有效性
-        lines = content.strip().split('\n')
-        if len(lines) < 2:
-            return False
-
-        # 检查是否有必要的字段
-        header = lines[0].strip()
-        if not header.startswith('# Netscape'):
-            return False
-
-        return True
+        lines = [
+            line for line in content.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        return content.lstrip().startswith("# Netscape") and any(
+            len(line.split("\t")) >= 7 for line in lines
+        )
 
     def import_from_file(self, platform: str, file_path: str) -> bool:
-        """从文件导入 Cookie，支持 JSON 和 Netscape 格式"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            print(f"[DEBUG] Read {len(content)} bytes from cookie file")
-            print(f"[DEBUG] First 100 chars: {content[:100]}")
-
-            # 检查是否是 JSON 格式
-            content_stripped = content.strip()
-            if content_stripped.startswith('[') or content_stripped.startswith('{'):
-                print("[DEBUG] Detected JSON format, converting...")
+            content = Path(file_path).read_text(encoding="utf-8-sig")
+            if content.lstrip().startswith(("[", "{")):
                 content = self._convert_json_to_netscape(content)
-                print(f"[DEBUG] Converted content: {content[:200]}...")
-            else:
-                print("[DEBUG] Detected Netscape format, using as-is")
-
             return self.save_cookie(platform, content)
-        except Exception as e:
-            print(f"导入 Cookie 文件失败: {e}")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return False
 
-    def _convert_json_to_netscape(self, json_content: str) -> str:
-        """将 EditThisCookie JSON 格式转换为 Netscape 格式"""
-        import json
-        cookies = json.loads(json_content)
+    def import_from_text(self, platform: str, content: str) -> bool:
+        try:
+            value = content.strip()
+            if value.startswith(("[", "{")):
+                value = self._convert_json_to_netscape(value)
+            return self.save_cookie(platform, value)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return False
 
-        lines = ["# Netscape HTTP Cookie File"]
-        lines.append("# Generated by VideoDownloader")
+    @staticmethod
+    def _convert_json_to_netscape(json_content: str) -> str:
+        data = json.loads(json_content)
+        if isinstance(data, dict):
+            data = data.get("cookies", [])
+        if not isinstance(data, list):
+            raise ValueError("Cookie JSON 必须是数组，或包含 cookies 数组")
 
-        for cookie in cookies:
-            domain = cookie.get('domain', '')
-            name = cookie.get('name', '')
-
-            # 跳过空名称的无效 Cookie
-            if not name:
+        lines = [
+            "# Netscape HTTP Cookie File",
+            "# Generated by VideoDownloader",
+        ]
+        for cookie in data:
+            if not isinstance(cookie, dict) or not cookie.get("name"):
                 continue
-
-            # hostOnly=true 表示只匹配精确域名，hostOnly=false 表示匹配所有子域名
-            # 对于 hostOnly=false 的 cookie，domain 应该以 . 开头用于后缀匹配
-            host_only = cookie.get('hostOnly', False)
-            if not host_only and domain and not domain.startswith('.'):
-                domain = '.' + domain
-
-            path = cookie.get('path', '/')
-            secure = 'TRUE' if cookie.get('secure', False) else 'FALSE'
-            # 0 表示会话结束，使用 9999999999 表示永不过期
-            expiration = cookie.get('expirationDate', 0)
-            if expiration == 0:
-                expiration = 9999999999
-            expiration = str(int(expiration))
-            value = cookie.get('value', '')
-
-            # tailmatch: TRUE 表示匹配子域名，FALSE 表示精确匹配
-            tailmatch = 'FALSE' if host_only else 'TRUE'
-
-            lines.append(f"{domain}\t{tailmatch}\t{path}\t{secure}\t{expiration}\t{name}\t{value}")
-
-        return '\n'.join(lines)
+            domain = str(cookie.get("domain") or "")
+            host_only = bool(cookie.get("hostOnly", False))
+            if not host_only and domain and not domain.startswith("."):
+                domain = "." + domain
+            expiration = cookie.get("expirationDate") or cookie.get("expiration") or 0
+            try:
+                expiration_value = str(int(float(expiration))) if expiration else "0"
+            except (TypeError, ValueError):
+                expiration_value = "0"
+            lines.append(
+                "\t".join(
+                    [
+                        domain,
+                        "FALSE" if host_only else "TRUE",
+                        str(cookie.get("path") or "/"),
+                        "TRUE" if cookie.get("secure") else "FALSE",
+                        expiration_value,
+                        str(cookie.get("name") or ""),
+                        str(cookie.get("value") or ""),
+                    ]
+                )
+            )
+        if len(lines) == 2:
+            raise ValueError("Cookie JSON 中没有可用条目")
+        return "\n".join(lines)
 
     def delete_cookie(self, platform: str) -> bool:
-        """删除 Cookie"""
-        cookie_path = self.get_cookie_path(platform)
-        if cookie_path.exists():
-            try:
-                cookie_path.unlink()
-                return True
-            except Exception as e:
-                print(f"删除 Cookie 失败: {e}")
-        return False
+        path = self.get_cookie_path(platform)
+        if not path.exists():
+            return True
+        try:
+            path.unlink()
+            return True
+        except OSError:
+            return False
 
     def get_all_cookies_status(self) -> Dict[str, Dict]:
-        """获取所有平台的 Cookie 状态"""
-        status = {}
-        for platform in self.PLATFORMS:
-            cookie_path = self.get_cookie_path(platform)
-            is_valid = self.is_cookie_valid(platform)
-            status[platform] = {
-                'path': str(cookie_path),
-                'exists': cookie_path.exists(),
-                'valid': is_valid,
+        return {
+            platform: {
+                "path": str(self.get_cookie_path(platform)),
+                "exists": self.get_cookie_path(platform).exists(),
+                "valid": self.is_cookie_valid(platform),
             }
-        return status
+            for platform in self.PLATFORMS
+        }
 
-    def auto_detect_platform(self, url: str) -> Optional[str]:
-        """从 URL 自动检测平台"""
-        if 'youtube.com' in url or 'youtu.be' in url:
-            return 'youtube'
-        elif 'bilibili.com' in url:
-            return 'bilibili'
+    @staticmethod
+    def auto_detect_platform(url: str) -> Optional[str]:
+        value = (url or "").lower()
+        if "youtube.com" in value or "youtu.be" in value:
+            return "youtube"
+        if "bilibili.com" in value or "b23.tv" in value:
+            return "bilibili"
+        if "douyin.com" in value:
+            return "douyin"
         return None
+
+    @classmethod
+    def _validate_platform(cls, platform: str) -> None:
+        if platform not in cls.PLATFORMS:
+            raise ValueError(f"不支持的平台: {platform}")

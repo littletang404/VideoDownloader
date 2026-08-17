@@ -1,207 +1,211 @@
-"""视频链接解析模块 - 自动识别平台并获取视频信息"""
+"""Video URL parsing powered by the embedded yt-dlp API."""
+from __future__ import annotations
+
 import re
-import subprocess
-import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Any, Dict, List, Optional
+
+import yt_dlp
+
+from .runtime import build_js_runtime_config, summarize_process_error
 
 
 class LinkParser:
-    """视频链接解析器"""
+    """Identify direct streams and delegate websites to yt-dlp."""
 
-    # 平台正则匹配
     PATTERNS = {
-        'youtube': r'(?:https?://)?(?:www\.)?(?:youtube\.com|youtu\.be)/',
-        'bilibili': r'(?:https?://)?(?:www\.)?bilibili\.com/',
-        'weibo': r'(?:https?://)?(?:www\.)?(?:weibo\.com|t\.cn)/',
-        'xiaohongshu': r'(?:https?://)?(?:www\.)?xiaohongshu\.com/',
-        'm3u8': r'.*\.m3u8(?:\?.*)?$',
+        "youtube": r"(?:https?://)?(?:www\.)?(?:youtube\.com|youtu\.be)/",
+        "bilibili": r"(?:https?://)?(?:www\.)?(?:bilibili\.com|b23\.tv)/",
+        "weibo": r"(?:https?://)?(?:www\.)?(?:weibo\.com|t\.cn)/",
+        "xiaohongshu": r"(?:https?://)?(?:www\.)?(?:xiaohongshu\.com|xhslink\.com)/",
+        "douyin": r"(?:https?://)?(?:www\.|v\.)?douyin\.com/",
     }
+    SHORT_HOSTS = {"t.cn", "b23.tv", "xhslink.com", "v.douyin.com"}
 
-    def __init__(self, yt_dlp_path: str = 'yt-dlp', ffmpeg_path: str = 'ffmpeg'):
+    def __init__(
+        self,
+        yt_dlp_path: str = "yt-dlp",
+        ffmpeg_path: str = "",
+        deno_path: Optional[str] = None,
+    ):
         self.yt_dlp_path = yt_dlp_path
         self.ffmpeg_path = ffmpeg_path
+        self.deno_path = deno_path
+
+    @staticmethod
+    def normalize_url(url: str) -> str:
+        """Convert supported share-page URLs into extractor-friendly URLs."""
+        value = (url or "").strip()
+        parsed = urllib.parse.urlparse(value)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.rstrip("/")
+        is_jingxuan = path == "/jingxuan" or path.startswith("/jingxuan/")
+        if host in {"douyin.com", "www.douyin.com"} and is_jingxuan:
+            modal_id = (urllib.parse.parse_qs(parsed.query).get("modal_id") or [""])[0]
+            if re.fullmatch(r"\d{10,24}", modal_id):
+                return f"https://www.douyin.com/video/{modal_id}"
+        return value
 
     def identify_platform(self, url: str) -> Optional[str]:
-        """识别视频平台"""
-        if re.match(self.PATTERNS['youtube'], url):
-            return 'youtube'
-        elif re.match(self.PATTERNS['bilibili'], url):
-            return 'bilibili'
-        elif re.match(self.PATTERNS['weibo'], url):
-            return 'weibo'
-        elif re.match(self.PATTERNS['xiaohongshu'], url):
-            return 'xiaohongshu'
-        elif re.match(self.PATTERNS['m3u8'], url):
-            return 'm3u8'
-        return None
+        value = (url or "").strip()
+        if not value:
+            return None
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return None
+        if re.search(r"\.m3u8(?:$|[?#])", value, re.IGNORECASE):
+            return "m3u8"
+        for platform, pattern in self.PATTERNS.items():
+            if re.match(pattern, value, re.IGNORECASE):
+                return platform
+        return "generic"
 
     def parse(self, url: str, cookies_path: Optional[str] = None) -> Dict[str, Any]:
-        """解析视频URL，返回视频信息"""
-        platform = self.identify_platform(url)
+        original_url = self.normalize_url(url)
+        platform = self.identify_platform(original_url)
         if not platform:
-            raise ValueError(f"不支持的链接格式: {url}")
+            raise ValueError("请输入完整的 http:// 或 https:// 视频链接")
 
-        # 微博短链接需要先解析真实URL
-        if platform == 'weibo' and 't.cn' in url:
-            url = self._resolve_short_url(url)
-            if not url:
-                raise ValueError("微博短链接解析失败")
+        parsed = urllib.parse.urlparse(original_url)
+        if parsed.netloc.lower() in self.SHORT_HOSTS:
+            resolved = self._resolve_short_url(original_url)
+            if resolved:
+                original_url = resolved
+                platform = self.identify_platform(original_url) or platform
 
-        if platform == 'm3u8':
-            return self._parse_m3u8(url)
-        else:
-            return self._parse_yt_dlp(url, cookies_path, platform)
+        if platform == "m3u8":
+            return self._parse_m3u8(original_url)
+        return self._parse_yt_dlp(original_url, cookies_path, platform)
 
     def _resolve_short_url(self, url: str) -> Optional[str]:
-        """解析短链接的真实URL"""
-        import urllib.request
-        import urllib.parse
-        import urllib.error
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+        )
         try:
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
-            response = urllib.request.urlopen(req, timeout=10)
-            final_url = response.geturl()
-            print(f"[DEBUG] Resolved short URL: {url} -> {final_url}")
-
-            # 如果重定向到 passport 页面，尝试从 url 参数中提取真实地址
-            if 'passport.weibo.com' in final_url:
-                parsed = urllib.parse.urlparse(final_url)
-                params = urllib.parse.parse_qs(parsed.query)
-                if 'url' in params:
-                    real_url = urllib.parse.unquote(params['url'][0])
-                    print(f"[DEBUG] Extracted real URL from passport: {real_url}")
-                    return real_url
-
+            with urllib.request.urlopen(request, timeout=12) as response:
+                final_url = response.geturl()
+            if "passport.weibo.com" in final_url:
+                params = urllib.parse.parse_qs(urllib.parse.urlparse(final_url).query)
+                if params.get("url"):
+                    return urllib.parse.unquote(params["url"][0])
             return final_url
-        except Exception as e:
-            print(f"[DEBUG] Failed to resolve short URL: {e}")
+        except (OSError, urllib.error.URLError):
             return None
 
-    def _parse_m3u8(self, url: str) -> Dict[str, Any]:
-        """解析 m3u8 直链"""
+    @staticmethod
+    def _parse_m3u8(url: str) -> Dict[str, Any]:
+        path = urllib.parse.urlparse(url).path
+        title = urllib.parse.unquote(Path(path).stem) or "m3u8_video"
         return {
-            'platform': 'm3u8',
-            'url': url,
-            'title': self._extract_title_from_url(url),
-            'formats': [{'format_id': 'm3u8', 'ext': 'mp4', 'resolution': '原始'}],
-            'thumbnail': None,
-            'duration': None,
+            "platform": "m3u8",
+            "url": url,
+            "title": title,
+            "formats": [
+                {
+                    "format_id": "m3u8",
+                    "ext": "mp4",
+                    "resolution": "原始画质",
+                    "height": 0,
+                    "vcodec": "unknown",
+                    "acodec": "unknown",
+                }
+            ],
+            "thumbnail": None,
+            "duration": None,
+            "uploader": "",
         }
 
-    def _parse_yt_dlp(self, url: str, cookies_path: Optional[str], platform: str) -> Dict[str, Any]:
-        """使用 yt-dlp 解析视频信息"""
-        cmd = [
-            self.yt_dlp_path,
-            '--dump-json',
-            '--no-download',
-            '--no-warnings',
-        ]
-
+    def _parse_yt_dlp(
+        self,
+        url: str,
+        cookies_path: Optional[str],
+        platform: str,
+    ) -> Dict[str, Any]:
+        options: Dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "skip_download": True,
+            "js_runtimes": build_js_runtime_config(self.deno_path),
+        }
         if cookies_path and Path(cookies_path).exists():
-            cmd.extend(['--cookies', cookies_path])
-
-        # YouTube 需要 Deno 运行时
-        if platform == 'youtube':
-            cmd.extend(['--js-runtimes', 'deno'])
-
-        # 微博视频不需要特殊处理
-        cmd.append(url)
-
-        print(f"[DEBUG] yt-dlp command: {' '.join(cmd)}")
+            options["cookiefile"] = cookies_path
+        if self.ffmpeg_path:
+            options["ffmpeg_location"] = self.ffmpeg_path
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8')
-            print(f"[DEBUG] yt-dlp return code: {result.returncode}")
-            if result.returncode != 0:
-                print(f"[DEBUG] yt-dlp stderr: {result.stderr}")
-                raise RuntimeError(f"解析失败: {result.stderr}")
+            with yt_dlp.YoutubeDL(options) as ydl:
+                data = ydl.extract_info(url, download=False)
+                data = ydl.sanitize_info(data)
+        except yt_dlp.utils.DownloadError as error:
+            raise RuntimeError(
+                summarize_process_error(str(error), "视频解析失败")
+            ) from error
+        except Exception as error:
+            raise RuntimeError(f"视频解析失败：{error}") from error
 
-            data = json.loads(result.stdout)
-            return self._format_video_info(data, platform)
-        except subprocess.CalledProcessError as e:
-            print(f"[DEBUG] CalledProcessError: {e}")
-            raise RuntimeError(f"解析失败: {e.stderr}")
+        if isinstance(data, dict) and data.get("_type") == "playlist":
+            entries = data.get("entries") or []
+            data = next((entry for entry in entries if entry), data)
+        if not isinstance(data, dict):
+            raise RuntimeError("解析器没有返回可用的视频信息")
+        return self._format_video_info(data, platform, url)
 
-    def _format_video_info(self, data: Dict, platform: str) -> Dict[str, Any]:
-        """格式化视频信息"""
-        formats = []
-        for f in data.get('formats', []):
-            format_id = f.get('format_id', '')
-            ext = f.get('ext', '')
-            resolution = f.get('resolution', '未知')
-            filesize = f.get('filesize', 0) or f.get('filesize_approx', 0)
-
-            # 简化分辨率显示
-            if f.get('width') and f.get('height'):
-                resolution = f"{f['width']}x{f['height']}"
-            elif f.get('height'):
-                resolution = f"{f['height']}p"
-
-            # 过滤无效格式
+    @staticmethod
+    def _format_video_info(
+        data: Dict[str, Any],
+        platform: str,
+        source_url: str,
+    ) -> Dict[str, Any]:
+        formats: List[Dict[str, Any]] = []
+        for item in data.get("formats") or []:
+            ext = item.get("ext") or ""
             if not ext:
                 continue
-
-            formats.append({
-                'format_id': format_id,
-                'ext': ext,
-                'resolution': resolution,
-                'filesize': filesize,
-                'vcodec': f.get('vcodec', 'none'),
-                'acodec': f.get('acodec', 'none'),
-                'tbr': f.get('tbr', 0),
-            })
+            width = item.get("width") or 0
+            height = item.get("height") or 0
+            resolution = item.get("resolution") or (
+                f"{width}x{height}" if width and height else f"{height}p" if height else "未知"
+            )
+            formats.append(
+                {
+                    "format_id": item.get("format_id", ""),
+                    "format_note": item.get("format_note", ""),
+                    "ext": ext,
+                    "resolution": resolution,
+                    "width": width,
+                    "height": height,
+                    "fps": item.get("fps") or 0,
+                    "filesize": item.get("filesize") or item.get("filesize_approx") or 0,
+                    "vcodec": item.get("vcodec") or "none",
+                    "acodec": item.get("acodec") or "none",
+                    "tbr": item.get("tbr") or 0,
+                    "language": item.get("language") or "",
+                    "dynamic_range": item.get("dynamic_range") or "",
+                }
+            )
 
         return {
-            'platform': platform,
-            'url': data.get('webpage_url', ''),
-            'title': data.get('title', '未知标题'),
-            'thumbnail': data.get('thumbnail'),
-            'duration': data.get('duration'),
-            'description': data.get('description', ''),
-            'uploader': data.get('uploader', ''),
-            'upload_date': data.get('upload_date', ''),
-            'formats': formats,
+            "platform": platform,
+            "url": data.get("webpage_url") or data.get("original_url") or source_url,
+            "title": data.get("title") or "未命名视频",
+            "thumbnail": data.get("thumbnail"),
+            "duration": data.get("duration"),
+            "description": data.get("description") or "",
+            "uploader": data.get("uploader") or data.get("channel") or "",
+            "upload_date": data.get("upload_date") or "",
+            "formats": formats,
         }
 
-    def _extract_title_from_url(self, url: str) -> str:
-        """从 URL 中提取标题（m3u8 用）"""
-        # 尝试从路径中提取
-        path = url.split('?')[0]
-        parts = path.rstrip('/').split('/')
-        if parts:
-            return parts[-1]
-        return 'm3u8_video'
-
-    def get_best_formats(self, formats: List[Dict]) -> tuple:
-        """获取最佳视频和音频格式组合"""
-        video_formats = [f for f in formats if f['vcodec'] != 'none' and f['acodec'] == 'none']
-        audio_formats = [f for f in formats if f['vcodec'] == 'none' and f['acodec'] != 'none']
-
-        # 按文件大小或比特率排序
-        video_formats.sort(key=lambda x: x.get('filesize', 0) or x.get('tbr', 0), reverse=True)
-        audio_formats.sort(key=lambda x: x.get('filesize', 0) or x.get('tbr', 0), reverse=True)
-
-        best_video = video_formats[0] if video_formats else None
-        best_audio = audio_formats[0] if audio_formats else None
-
-        return best_video, best_audio
-
-    def select_format_by_resolution(self, formats: List[Dict], resolution: str) -> tuple:
-        """按分辨率选择格式，返回 (视频format_id, 音频format_id)"""
-        target_height = int(resolution.rstrip('p'))
-
-        # 找最接近目标分辨率的视频格式
-        video_formats = [f for f in formats if f['vcodec'] != 'none' and f['acodec'] == 'none']
-        video_formats.sort(key=lambda x: abs(int(x['resolution'].rstrip('p').split('x')[-1]) - target_height) if x['resolution'] != '未知' else 9999)
-
-        # 找最佳音频格式
-        audio_formats = [f for f in formats if f['vcodec'] == 'none' and f['acodec'] != 'none']
-        audio_formats.sort(key=lambda x: x.get('filesize', 0) or x.get('tbr', 0), reverse=True)
-
-        best_video = video_formats[0] if video_formats else None
-        best_audio = audio_formats[0] if audio_formats else None
-
-        return best_video, best_audio
+    @staticmethod
+    def available_heights(formats: List[Dict[str, Any]]) -> List[int]:
+        heights = {
+            int(item.get("height") or 0)
+            for item in formats
+            if item.get("vcodec") != "none" and int(item.get("height") or 0) > 0
+        }
+        return sorted(heights, reverse=True)

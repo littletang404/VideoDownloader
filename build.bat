@@ -1,49 +1,51 @@
-@echo off
+﻿@echo off
+setlocal EnableExtensions
 chcp 65001 >nul
+cd /d "%~dp0"
+
 echo ========================================
-echo   VideoDownloader 打包脚本
+echo   万能视频下载器 - Windows 构建
 echo ========================================
-echo.
 
-REM 保存原始目录
-set PROJECT_ROOT=%CD%
-
-REM 创建输出目录
-if not exist "release" mkdir release
-
-REM 安装 PyInstaller（如果未安装）
-pip show pyinstaller >nul 2>&1
-if %errorlevel% neq 0 (
+python -c "import PyInstaller" >nul 2>&1
+if errorlevel 1 (
     echo 正在安装 PyInstaller...
-    pip install pyinstaller
+    python -m pip install "pyinstaller>=6.0"
+    if errorlevel 1 goto :failed
 )
 
-echo.
-echo 正在打包，请稍候...
-echo.
+python -m PyInstaller --noconfirm --clean --distpath dist --workpath build\pyinstaller VideoDownloader.spec
+if errorlevel 1 goto :failed
 
-REM 打包为单个exe文件，输出到 release 目录
-pyinstaller --onefile --noconfirm ^
-    --distpath release ^
-    --workpath release\build ^
-    --specpath release ^
-    --name VideoDownloader ^
-    main.py
+if not exist "dist\tools" mkdir "dist\tools"
 
-echo.
-if exist "release\VideoDownloader.exe" (
-    echo ========================================
-    echo   打包成功！
-    echo   输出文件: release\VideoDownloader.exe
-    echo ========================================
-    echo.
-    echo 正在复制必要文件...
-    xcopy /e /y "tools" "release\tools\" >nul 2>&1
-    xcopy /e /y "cookies" "release\cookies\" >nul 2>&1
-    xcopy /e /y "config" "release\config\" >nul 2>&1
-    echo 复制完成！请将 release 目录下的所有文件一起分发。
+set "FFMPEG_SOURCE="
+if exist "tools\ffmpeg\bin\ffmpeg.exe" set "FFMPEG_SOURCE=tools\ffmpeg\bin"
+for /d %%D in ("tools\ffmpeg_full\*") do (
+    if exist "%%~fD\bin\ffmpeg.exe" set "FFMPEG_SOURCE=%%~fD\bin"
+)
+
+if defined FFMPEG_SOURCE (
+    copy /y "%FFMPEG_SOURCE%\ffmpeg.exe" "dist\tools\ffmpeg.exe" >nul
+    if exist "%FFMPEG_SOURCE%\ffprobe.exe" copy /y "%FFMPEG_SOURCE%\ffprobe.exe" "dist\tools\ffprobe.exe" >nul
+    echo 已复制 ffmpeg / ffprobe
 ) else (
-    echo 打包失败，请检查错误信息
+    echo [提示] 未找到可打包的 ffmpeg。用户可在设置中选择系统 ffmpeg。
 )
 
-pause
+if exist "%USERPROFILE%\.deno\bin\deno.exe" copy /y "%USERPROFILE%\.deno\bin\deno.exe" "dist\tools\deno.exe" >nul
+if exist "tools\deno\deno.exe" copy /y "tools\deno\deno.exe" "dist\tools\deno.exe" >nul
+if exist "tools\deno.exe" copy /y "tools\deno.exe" "dist\tools\deno.exe" >nul
+
+echo.
+echo 构建完成：dist\VideoDownloader.exe
+echo 用户 Cookie 和历史记录不会复制进发布包。
+goto :end
+
+:failed
+echo.
+echo 构建失败，请查看上方错误信息。
+exit /b 1
+
+:end
+endlocal
