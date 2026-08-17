@@ -1,65 +1,64 @@
-"""VideoDownloader - 视频下载器
+"""VideoDownloader application entry point."""
+from __future__ import annotations
 
-支持 YouTube、Bilibili、m3u8 直链下载
-内置 ffmpeg 转码功能
-"""
-import sys
-import os
 import json
+import os
+import sys
 from pathlib import Path
 
-# 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QApplication
+
 from VideoDownloader.ui.main_window import MainWindow
+from VideoDownloader.utils import data_path, get_resource_path
+
+
+DEFAULT_CONFIG = {
+    "download_path": str(Path.home() / "Downloads"),
+    "max_concurrent": 3,
+    "ffmpeg_custom": False,
+    "ffmpeg_path": "",
+    "deno_custom": False,
+    "deno_path": "",
+    "cookie_path": "cookies",
+}
 
 
 def load_config() -> dict:
-    """加载配置"""
-    config_path = Path('config/settings.json')
-    default_config = {
-        'download_path': str(Path.home() / 'Downloads'),
-        'max_concurrent': 3,
-        'ffmpeg_custom': False,
-        'ffmpeg_path': '',
-        'deno_custom': False,
-        'deno_path': '',
-        'cookie_path': 'cookies',
-    }
-
+    config_path = data_path("config/settings.json")
+    config = DEFAULT_CONFIG.copy()
     if config_path.exists():
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                # 合并默认配置
-                for key, value in default_config.items():
-                    if key not in config:
-                        config[key] = value
-                return config
-        except Exception as e:
-            print(f"加载配置失败: {e}")
-
-    return default_config
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(saved, dict):
+                config.update(saved)
+        except (OSError, ValueError) as error:
+            print(f"加载配置失败: {error}")
+    return config
 
 
-def main():
-    """主函数"""
-    # 创建应用
+def main() -> None:
+    smoke_test = "--smoke-test" in sys.argv
     app = QApplication(sys.argv)
-    app.setApplicationName("视频下载器")
+    app.setApplicationName("万能视频下载器")
     app.setOrganizationName("VideoDownloader")
+    app.setWindowIcon(QIcon(get_resource_path("resources/app_icon.png")))
+    app.setStyle("Fusion")
+    app.setFont(QFont("Microsoft YaHei UI", 10))
 
-    # 加载配置
-    config = load_config()
+    window = MainWindow(load_config())
+    if smoke_test:
+        window.ensurePolished()
+        app.processEvents()
+        window.deleteLater()
+        app.processEvents()
+        return
 
-    # 创建并显示主窗口
-    window = MainWindow(config)
     window.show()
-
-    # 运行应用
     sys.exit(app.exec())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

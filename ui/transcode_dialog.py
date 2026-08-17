@@ -1,339 +1,273 @@
-"""转码对话框"""
-from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
-                             QGroupBox, QLineEdit, QPushButton, QFileDialog,
-                             QRadioButton, QSpinBox, QLabel, QProgressBar,
-                             QMessageBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+"""Local media conversion dialog."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+)
+
+from .theme import apply_theme
 
 
 class TranscodeThread(QThread):
-    """转码线程"""
     progress = pyqtSignal(float)
-    finished = pyqtSignal(bool, str)
+    completed = pyqtSignal(bool, str)
 
-    def __init__(self, handler, input_path, output_path, settings):
+    def __init__(self, handler, input_path: str, output_path: str, settings: dict):
         super().__init__()
         self.handler = handler
         self.input_path = input_path
         self.output_path = output_path
         self.settings = settings
 
-    def run(self):
+    def run(self) -> None:
         try:
             success = self.handler.transcode(
                 self.input_path,
                 self.output_path,
-                video_codec=self.settings.get('video_codec', 'copy'),
-                audio_codec=self.settings.get('audio_codec', 'copy'),
-                video_bitrate=self.settings.get('video_bitrate'),
-                audio_bitrate=self.settings.get('audio_bitrate', '192k'),
-                resolution=self.settings.get('resolution'),
-                progress_callback=self._on_progress
+                video_codec=self.settings["video_codec"],
+                audio_codec=self.settings["audio_codec"],
+                resolution=self.settings["resolution"],
+                progress_callback=self.progress.emit,
             )
-            self.finished.emit(success, '' if success else '转码失败')
-        except Exception as e:
-            self.finished.emit(False, str(e))
-
-    def _on_progress(self, progress: float):
-        self.progress.emit(progress)
+            self.completed.emit(success, "" if success else self.handler.last_error)
+        except Exception as error:
+            self.completed.emit(False, str(error))
 
 
 class TranscodeDialog(QDialog):
-    """转码对话框"""
-
     def __init__(self, ffmpeg_handler, parent=None):
         super().__init__(parent)
         self.ffmpeg_handler = ffmpeg_handler
         self.transcode_thread = None
-        self.input_file = ''
-        self.output_file = ''
-        self.init_ui()
+        self.setWindowTitle("视频转换")
+        self.setMinimumSize(680, 470)
+        apply_theme(self)
+        self._build_ui()
 
-    def init_ui(self):
-        self.setWindowTitle("转码/格式转换")
-        self.setMinimumWidth(500)
-        self.resize(500, 450)
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(16)
 
-        # 深色主题样式
-        self.setStyleSheet("""
-            QWidget {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-            }
-            QGroupBox {
-                border: 1px solid #3a3a3a;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding: 10px;
-                font-weight: bold;
-            }
-            QGroupBox::title {
-                color: #4a9eff;
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                padding: 0 5px;
-            }
-            QLabel {
-                color: #c0c0c0;
-            }
-            QLineEdit, QSpinBox {
-                background-color: #2d2d2d;
-                color: #ffffff;
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                padding: 5px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #4a9eff;
-            }
-            QPushButton {
-                background-color: #3a3a3a;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-                padding: 6px 16px;
-            }
-            QPushButton:hover {
-                background-color: #4a4a4a;
-            }
-            QRadioButton {
-                color: #e0e0e0;
-            }
-            QProgressBar {
-                border: 1px solid #3a3a3a;
-                border-radius: 4px;
-                background-color: #2d2d2d;
-                text-align: center;
-                color: #ffffff;
-            }
-            QProgressBar::chunk {
-                background-color: #4a9eff;
-                border-radius: 3px;
-            }
-        """)
+        title = QLabel("视频转换")
+        title.setObjectName("HeroTitle")
+        layout.addWidget(title)
 
-        layout = QVBoxLayout()
+        hint = QLabel("转换封装格式、编码或分辨率。调整分辨率时会自动重新编码视频。")
+        hint.setProperty("muted", True)
+        layout.addWidget(hint)
 
-        # 文件选择
-        file_group = QGroupBox("文件选择")
-        file_layout = QFormLayout()
+        form = QFormLayout()
+        form.setSpacing(12)
 
+        input_row = QHBoxLayout()
         self.input_edit = QLineEdit()
-        input_btn = QPushButton("选择文件...")
-        input_btn.clicked.connect(self.browse_input)
-        input_layout = QHBoxLayout()
-        input_layout.addWidget(self.input_edit)
-        input_layout.addWidget(input_btn)
-        file_layout.addRow("输入文件:", input_layout)
+        self.input_edit.setPlaceholderText("选择需要转换的视频")
+        input_row.addWidget(self.input_edit, 1)
+        input_btn = QPushButton("选择")
+        input_btn.clicked.connect(self._browse_input)
+        input_row.addWidget(input_btn)
+        form.addRow("输入文件", input_row)
 
+        output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
-        output_btn = QPushButton("选择保存位置...")
-        output_btn.clicked.connect(self.browse_output)
-        output_layout = QHBoxLayout()
-        output_layout.addWidget(self.output_edit)
-        output_layout.addWidget(output_btn)
-        file_layout.addRow("输出文件:", output_layout)
+        self.output_edit.setPlaceholderText("选择输出位置")
+        output_row.addWidget(self.output_edit, 1)
+        output_btn = QPushButton("选择")
+        output_btn.clicked.connect(self._browse_output)
+        output_row.addWidget(output_btn)
+        form.addRow("输出文件", output_row)
 
-        file_group.setLayout(file_layout)
-        layout.addWidget(file_group)
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("MP4 · 通用兼容", "mp4")
+        self.format_combo.addItem("MKV · 多轨与高兼容", "mkv")
+        self.format_combo.addItem("MOV · 剪辑软件", "mov")
+        self.format_combo.addItem("AVI · 旧设备", "avi")
+        self.format_combo.currentIndexChanged.connect(self._sync_output_suffix)
+        form.addRow("容器格式", self.format_combo)
 
-        # 编码设置
-        encode_group = QGroupBox("编码设置")
-        encode_layout = QVBoxLayout()
+        self.video_combo = QComboBox()
+        self.video_combo.addItem("保持原编码（最快）", "copy")
+        self.video_combo.addItem("H.264 · 兼容优先", "h264")
+        self.video_combo.addItem("H.265 · 体积优先", "h265")
+        self.video_combo.addItem("AV1 · 高压缩率", "av1")
+        form.addRow("视频编码", self.video_combo)
 
-        # 格式
-        format_layout = QHBoxLayout()
-        format_layout.addWidget(QLabel("输出格式:"))
-        self.format_group = []
-        for fmt in ['MP4', 'MKV', 'AVI', 'MOV']:
-            rb = QRadioButton(fmt)
-            if fmt == 'MP4':
-                rb.setChecked(True)
-            self.format_group.append((fmt, rb))
-            format_layout.addWidget(rb)
-        format_layout.addStretch()
-        encode_layout.addLayout(format_layout)
+        self.audio_combo = QComboBox()
+        self.audio_combo.addItem("AAC · 推荐", "aac")
+        self.audio_combo.addItem("保持原编码", "copy")
+        self.audio_combo.addItem("MP3", "mp3")
+        self.audio_combo.addItem("FLAC · 无损", "flac")
+        form.addRow("音频编码", self.audio_combo)
 
-        # 视频编码
-        video_layout = QHBoxLayout()
-        video_layout.addWidget(QLabel("视频编码:"))
-        self.video_codec_group = []
-        for codec in [('copy', '复制（不转码）'), ('h264', 'H.264'), ('h265', 'H.265'), ('av1', 'AV1')]:
-            rb = QRadioButton(codec[1])
-            if codec[0] == 'copy':
-                rb.setChecked(True)
-            self.video_codec_group.append((codec[0], rb))
-            video_layout.addWidget(rb)
-        video_layout.addStretch()
-        encode_layout.addLayout(video_layout)
+        self.resolution_combo = QComboBox()
+        self.resolution_combo.setEditable(True)
+        self.resolution_combo.addItem("保持原分辨率", "")
+        self.resolution_combo.addItem("4K · 2160p", "2160p")
+        self.resolution_combo.addItem("Full HD · 1080p", "1080p")
+        self.resolution_combo.addItem("HD · 720p", "720p")
+        self.resolution_combo.setToolTip("也可以直接输入 1920x1080")
+        form.addRow("分辨率", self.resolution_combo)
 
-        # 音频编码
-        audio_layout = QHBoxLayout()
-        audio_layout.addWidget(QLabel("音频编码:"))
-        self.audio_codec_group = []
-        for codec in [('copy', '复制（不转码）'), ('aac', 'AAC'), ('mp3', 'MP3'), ('flac', 'FLAC')]:
-            rb = QRadioButton(codec[1])
-            if codec[0] == 'aac':
-                rb.setChecked(True)
-            self.audio_codec_group.append((codec[0], rb))
-            audio_layout.addWidget(rb)
-        audio_layout.addStretch()
-        encode_layout.addLayout(audio_layout)
+        layout.addLayout(form)
 
-        # 分辨率
-        res_layout = QHBoxLayout()
-        res_layout.addWidget(QLabel("分辨率:"))
-        self.resolution_group = []
-        for res in [('original', '原始'), ('1080p', '1080p'), ('720p', '720p')]:
-            rb = QRadioButton(res[1])
-            if res[0] == 'original':
-                rb.setChecked(True)
-            self.resolution_group.append((res[0], rb))
-            res_layout.addWidget(rb)
+        self.status_label = QLabel("准备就绪")
+        self.status_label.setProperty("muted", True)
+        layout.addWidget(self.status_label)
 
-        self.custom_res_edit = QLineEdit()
-        self.custom_res_edit.setPlaceholderText("如: 1920x1080")
-        self.custom_res_edit.setMaximumWidth(100)
-        res_layout.addWidget(self.custom_res_edit)
-        res_layout.addStretch()
-        encode_layout.addLayout(res_layout)
-
-        encode_group.setLayout(encode_layout)
-        layout.addWidget(encode_group)
-
-        # 进度条
         self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
-        # 按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
+        actions = QHBoxLayout()
+        actions.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.close)
+        actions.addWidget(close_btn)
+        self.start_btn = QPushButton("开始转换")
+        self.start_btn.setProperty("primary", True)
+        self.start_btn.clicked.connect(self._start)
+        actions.addWidget(self.start_btn)
+        layout.addLayout(actions)
 
-        self.start_btn = QPushButton("开始转码")
-        self.start_btn.clicked.connect(self.start_transcode)
-        cancel_btn = QPushButton("关闭")
-        cancel_btn.clicked.connect(self.close)
-
-        btn_layout.addWidget(self.start_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-        self.setLayout(layout)
-
-    def browse_input(self):
-        file, _ = QFileDialog.getOpenFileName(
-            self, "选择视频文件", "",
-            "视频文件 (*.mp4 *.mkv *.avi *.mov *.ts *.m3u8);;所有文件 (*.*)"
+    def _browse_input(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择视频文件",
+            "",
+            "视频文件 (*.mp4 *.mkv *.avi *.mov *.webm *.ts);;所有文件 (*.*)",
         )
-        if file:
-            self.input_file = file
-            self.input_edit.setText(file)
-            # 自动生成输出文件名
-            if not self.output_edit.text():
-                import os
-                base = os.path.splitext(file)[0]
-                self.output_edit.setText(f"{base}_transcoded.mp4")
+        if not file_path:
+            return
+        self.input_edit.setText(file_path)
+        if not self.output_edit.text().strip():
+            source = Path(file_path)
+            self.output_edit.setText(
+                str(source.with_name(f"{source.stem}_converted.mp4"))
+            )
 
-    def browse_output(self):
-        file, _ = QFileDialog.getSaveFileName(
-            self, "选择保存位置", self.output_edit.text() or "",
-            "MP4 (*.mp4);;MKV (*.mkv);;AVI (*.avi);;MOV (*.mov);;所有文件 (*.*)"
+    def _browse_output(self) -> None:
+        suffix = self.format_combo.currentData()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择输出文件",
+            self.output_edit.text().strip(),
+            f"{suffix.upper()} 文件 (*.{suffix});;所有文件 (*.*)",
         )
-        if file:
-            self.output_file = file
-            self.output_edit.setText(file)
+        if file_path:
+            self.output_edit.setText(file_path)
+            self._sync_output_suffix()
 
-    def get_settings(self) -> dict:
-        """获取转码设置"""
-        # 格式
-        output_format = 'mp4'
-        for fmt, rb in self.format_group:
-            if rb.isChecked():
-                output_format = fmt.lower()
-                break
+    def _sync_output_suffix(self) -> None:
+        value = self.output_edit.text().strip()
+        if not value:
+            return
+        suffix = "." + str(self.format_combo.currentData())
+        self.output_edit.setText(str(Path(value).with_suffix(suffix)))
 
-        # 视频编码
-        video_codec = 'copy'
-        for codec, rb in self.video_codec_group:
-            if rb.isChecked():
-                video_codec = codec
-                break
-
-        # 音频编码
-        audio_codec = 'aac'
-        for codec, rb in self.audio_codec_group:
-            if rb.isChecked():
-                audio_codec = codec
-                break
-
-        # 分辨率
-        resolution = None
-        for res, rb in self.resolution_group:
-            if rb.isChecked():
-                if res == 'original':
-                    resolution = None
-                else:
-                    resolution = res
-                break
-
-        # 自定义分辨率
-        custom_res = self.custom_res_edit.text().strip()
-        if custom_res and resolution is None:
-            resolution = custom_res
-
+    def _settings(self) -> dict:
+        resolution = self.resolution_combo.currentData()
+        if self.resolution_combo.currentText() not in {
+            self.resolution_combo.itemText(i)
+            for i in range(self.resolution_combo.count())
+        }:
+            resolution = self.resolution_combo.currentText().strip()
         return {
-            'format': output_format,
-            'video_codec': video_codec,
-            'audio_codec': audio_codec,
-            'resolution': resolution,
+            "video_codec": self.video_combo.currentData(),
+            "audio_codec": self.audio_combo.currentData(),
+            "resolution": resolution or None,
         }
 
-    def start_transcode(self):
-        if not self.input_file or not self.output_file:
-            QMessageBox.warning(self, "提示", "请选择输入和输出文件")
+    def _start(self) -> None:
+        input_path = Path(self.input_edit.text().strip()).expanduser()
+        output_path = Path(self.output_edit.text().strip()).expanduser()
+        if not input_path.is_file():
+            QMessageBox.warning(self, "输入文件无效", "请选择存在的视频文件。")
+            return
+        if not self.output_edit.text().strip():
+            QMessageBox.warning(self, "输出位置为空", "请选择输出文件。")
             return
 
-        settings = self.get_settings()
+        output_path = output_path.with_suffix("." + str(self.format_combo.currentData()))
+        self.output_edit.setText(str(output_path))
+        if output_path.exists():
+            reply = QMessageBox.question(
+                self,
+                "覆盖已有文件",
+                f"{output_path.name} 已存在，是否覆盖？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
-        # 修改输出文件扩展名
-        import os
-        output_path = self.output_file
-        if not output_path.endswith(f".{settings['format']}"):
-            output_path = f"{output_path.rsplit('.', 1)[0]}.{settings['format']}"
+        if not self.ffmpeg_handler.is_available():
+            QMessageBox.warning(
+                self,
+                "ffmpeg 不可用",
+                "没有检测到可用的 ffmpeg，请先到设置中配置。",
+            )
+            return
 
         self.start_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.status_label.setText("正在转换，请不要关闭窗口…")
 
         self.transcode_thread = TranscodeThread(
             self.ffmpeg_handler,
-            self.input_file,
-            output_path,
-            settings
+            str(input_path),
+            str(output_path),
+            self._settings(),
         )
         self.transcode_thread.progress.connect(self._on_progress)
-        self.transcode_thread.finished.connect(self._on_finished)
+        self.transcode_thread.completed.connect(self._on_finished)
         self.transcode_thread.start()
 
-    def _on_progress(self, progress: float):
+    def _on_progress(self, progress: float) -> None:
         if progress < 0:
-            # 不确定进度，只显示动画或文本
-            self.progress_bar.setRange(0, 0)  # 切换到不确定模式
+            self.progress_bar.setRange(0, 0)
         else:
             self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(int(progress))
+            self.progress_bar.setValue(round(progress))
 
-    def _on_finished(self, success: bool, error: str):
+    def _on_finished(self, success: bool, error: str) -> None:
         self.start_btn.setEnabled(True)
-
+        self.progress_bar.setRange(0, 100)
         if success:
-            QMessageBox.information(self, "完成", "转码完成！")
+            self.progress_bar.setValue(100)
+            self.status_label.setText("转换完成")
+            QMessageBox.information(self, "转换完成", "视频已成功转换。")
         else:
-            QMessageBox.critical(self, "错误", f"转码失败: {error}")
+            self.status_label.setText("转换失败")
+            QMessageBox.critical(
+                self,
+                "转换失败",
+                error or "ffmpeg 未能完成转换，请检查输入文件和编码设置。",
+            )
 
-    def closeEvent(self, event):
+    def closeEvent(self, event) -> None:
         if self.transcode_thread and self.transcode_thread.isRunning():
-            self.transcode_thread.terminate()
-            self.transcode_thread.wait()
+            QMessageBox.information(
+                self,
+                "正在转换",
+                "转换仍在进行中。为避免输出文件损坏，请等待任务完成后再关闭。",
+            )
+            event.ignore()
+            return
         event.accept()
